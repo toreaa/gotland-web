@@ -93,7 +93,7 @@ export default function Dashboard() {
   const syncStrava = async () => {
     setSyncing(true)
     try {
-      const res = await fetch('/api/cron/sync-strava')
+      const res = await fetch('/api/strava/sync', { method: 'POST' })
       const data = await res.json()
       if (data.synced > 0 && selectedWeek) {
         fetchActivities(selectedWeek.start_date, selectedWeek.end_date)
