@@ -19,24 +19,52 @@ export async function GET() {
 
   const token = tokens[0]
 
-  // Check if expired
-  const now = Math.floor(Date.now() / 1000)
-  const isExpired = token.expires_at < now
-
   // Fetch latest activities from Strava
   const response = await fetch(
-    'https://www.strava.com/api/v3/athlete/activities?per_page=10',
+    'https://www.strava.com/api/v3/athlete/activities?per_page=5',
     {
       headers: { Authorization: `Bearer ${token.access_token}` },
     }
   )
 
-  const stravaData = await response.json()
+  const stravaActivities = await response.json()
+
+  // Try to insert first activity
+  const activity = stravaActivities[0]
+  const insertData = {
+    strava_id: activity.id,
+    strava_athlete_id: token.athlete_id,
+    name: activity.name,
+    activity_type: activity.type,
+    sport_type: activity.sport_type,
+    date: activity.start_date,
+    distance_km: activity.distance / 1000,
+    moving_time_seconds: activity.moving_time,
+    elapsed_time_seconds: activity.elapsed_time,
+    elevation_gain: activity.total_elevation_gain,
+    average_speed: activity.average_speed,
+    max_speed: activity.max_speed,
+    average_heartrate: activity.average_heartrate,
+    max_heartrate: activity.max_heartrate,
+    calories: activity.kilojoules ? Math.round(activity.kilojoules * 0.239) : null,
+    suffer_score: activity.suffer_score,
+    synced_at: new Date().toISOString(),
+  }
+
+  const { data: insertedData, error: insertError } = await supabase
+    .from('activities')
+    .upsert(insertData, { onConflict: 'strava_id' })
+    .select()
 
   return NextResponse.json({
-    token_expired: isExpired,
-    token_expires_at: new Date(token.expires_at * 1000).toISOString(),
-    strava_response_status: response.status,
-    strava_activities: stravaData,
+    strava_activity: {
+      id: activity.id,
+      name: activity.name,
+      date: activity.start_date,
+      distance: activity.distance,
+    },
+    insert_data: insertData,
+    insert_result: insertedData,
+    insert_error: insertError,
   })
 }
