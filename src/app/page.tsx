@@ -74,7 +74,7 @@ export default function Dashboard() {
       .from('strava_tokens')
       .select('athlete_id')
       .limit(1)
-    setStravaConnected(data && data.length > 0)
+    setStravaConnected(!!(data && data.length > 0))
   }
 
   const fetchActivities = async (startDate: string, endDate: string) => {
