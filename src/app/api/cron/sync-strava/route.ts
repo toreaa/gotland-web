@@ -4,13 +4,18 @@ import { createClient } from '@supabase/supabase-js'
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
 
-// Verify cron secret to prevent unauthorized access
-function verifyCronSecret(request: NextRequest): boolean {
-  const authHeader = request.headers.get('authorization')
-  if (!authHeader) return false
+// Verify request is from Vercel Cron or has valid secret
+function isAuthorizedCronRequest(request: NextRequest): boolean {
+  // Vercel Cron sends this header
+  const vercelCron = request.headers.get('x-vercel-cron')
+  if (vercelCron) return true
 
+  // Also accept CRON_SECRET if configured
+  const authHeader = request.headers.get('authorization')
   const cronSecret = process.env.CRON_SECRET
-  return authHeader === `Bearer ${cronSecret}`
+  if (cronSecret && authHeader === `Bearer ${cronSecret}`) return true
+
+  return false
 }
 
 // Refresh Strava access token if expired
@@ -72,8 +77,8 @@ async function fetchStravaActivities(
 }
 
 export async function GET(request: NextRequest) {
-  // Verify cron secret (skip in development)
-  if (process.env.NODE_ENV === 'production' && !verifyCronSecret(request)) {
+  // Verify request is from Vercel Cron (skip in development)
+  if (process.env.NODE_ENV === 'production' && !isAuthorizedCronRequest(request)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
@@ -155,9 +160,9 @@ export async function GET(request: NextRequest) {
             elevation_gain: activity.total_elevation_gain,
             average_speed: activity.average_speed,
             max_speed: activity.max_speed,
-            average_heartrate: activity.average_heartrate,
-            max_heartrate: activity.max_heartrate,
-            calories: activity.calories,
+            average_heartrate: activity.average_heartrate ? Math.round(activity.average_heartrate) : null,
+            max_heartrate: activity.max_heartrate ? Math.round(activity.max_heartrate) : null,
+            calories: activity.kilojoules ? Math.round(activity.kilojoules * 0.239) : null,
             suffer_score: activity.suffer_score,
             raw_data: activity,
             synced_at: new Date().toISOString(),
