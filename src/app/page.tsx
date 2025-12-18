@@ -24,6 +24,18 @@ interface Activity {
   moving_time_seconds: number
   elevation_gain: number
   average_heartrate: number | null
+  max_heartrate: number | null
+}
+
+interface BaseTest {
+  id: number
+  name: string
+  date: string
+  distance_km: number
+  moving_time_seconds: number
+  average_heartrate: number | null
+  max_heartrate: number | null
+  average_speed: number | null
 }
 
 interface WeekData {
@@ -49,6 +61,7 @@ export default function Dashboard() {
   const [daysUntilRace, setDaysUntilRace] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [stravaConnected, setStravaConnected] = useState(false)
+  const [baseTests, setBaseTests] = useState<BaseTest[]>([])
 
   useEffect(() => {
     // Beregn dager til løpet
@@ -60,7 +73,20 @@ export default function Dashboard() {
     // Hent data fra Supabase
     fetchWeeks()
     checkStravaConnection()
+    fetchBaseTests()
   }, [])
+
+  const fetchBaseTests = async () => {
+    const { data, error } = await supabase
+      .from('activities')
+      .select('id, name, date, distance_km, moving_time_seconds, average_heartrate, max_heartrate, average_speed')
+      .ilike('name', '%base%')
+      .order('date', { ascending: true })
+
+    if (!error && data) {
+      setBaseTests(data)
+    }
+  }
 
   // Hent aktiviteter når valgt uke endres
   useEffect(() => {
@@ -98,6 +124,7 @@ export default function Dashboard() {
       if (data.synced > 0 && selectedWeek) {
         fetchActivities(selectedWeek.start_date, selectedWeek.end_date)
         fetchWeeks()
+        fetchBaseTests()
       }
       alert(`Synkronisert ${data.synced} aktiviteter`)
     } catch (err) {
@@ -496,6 +523,139 @@ export default function Dashboard() {
                 </div>
               )}
             </div>
+          )}
+        </div>
+
+        {/* Basetester - Formutvikling */}
+        <div className="mt-8 bg-slate-800 rounded-xl p-6">
+          <h2 className="text-xl font-bold mb-2">Basetester</h2>
+          <p className="text-slate-400 text-sm mb-6">
+            Aktiviteter med "base" i navnet. Sporer pulsutvikling over tid for å måle fremgang.
+          </p>
+
+          {baseTests.length === 0 ? (
+            <div className="bg-slate-900 rounded-lg p-8 text-center">
+              <p className="text-slate-400">Ingen basetester funnet.</p>
+              <p className="text-slate-500 text-sm mt-2">
+                Navngi en aktivitet med "base" i Strava for å spore den her.
+              </p>
+            </div>
+          ) : (
+            <>
+              {/* Tabell med basetester */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-700">
+                      <th className="text-left py-3 px-2 text-slate-400 font-medium">Dato</th>
+                      <th className="text-left py-3 px-2 text-slate-400 font-medium">Navn</th>
+                      <th className="text-right py-3 px-2 text-slate-400 font-medium">Distanse</th>
+                      <th className="text-right py-3 px-2 text-slate-400 font-medium">Tid</th>
+                      <th className="text-right py-3 px-2 text-slate-400 font-medium">Pace</th>
+                      <th className="text-right py-3 px-2 text-slate-400 font-medium">Snitt HR</th>
+                      <th className="text-right py-3 px-2 text-slate-400 font-medium">Maks HR</th>
+                      <th className="text-right py-3 px-2 text-slate-400 font-medium">Trend</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {baseTests.map((test, index) => {
+                      const prevTest = index > 0 ? baseTests[index - 1] : null
+                      const hrDiff = prevTest && test.average_heartrate && prevTest.average_heartrate
+                        ? test.average_heartrate - prevTest.average_heartrate
+                        : null
+
+                      return (
+                        <tr key={test.id} className="border-b border-slate-700/50 hover:bg-slate-700/30">
+                          <td className="py-3 px-2">
+                            {new Date(test.date).toLocaleDateString('nb-NO', {
+                              day: 'numeric',
+                              month: 'short',
+                              year: '2-digit'
+                            })}
+                          </td>
+                          <td className="py-3 px-2 text-slate-300">{test.name}</td>
+                          <td className="py-3 px-2 text-right">{test.distance_km?.toFixed(2)} km</td>
+                          <td className="py-3 px-2 text-right">{formatDuration(test.moving_time_seconds)}</td>
+                          <td className="py-3 px-2 text-right">
+                            {test.moving_time_seconds && test.distance_km > 0
+                              ? `${Math.floor(test.moving_time_seconds / 60 / test.distance_km)}:${String(Math.round((test.moving_time_seconds / 60 / test.distance_km % 1) * 60)).padStart(2, '0')}`
+                              : '-'}
+                          </td>
+                          <td className="py-3 px-2 text-right font-medium text-rose-400">
+                            {test.average_heartrate ? `${test.average_heartrate}` : '-'}
+                          </td>
+                          <td className="py-3 px-2 text-right font-medium text-red-500">
+                            {test.max_heartrate ? `${test.max_heartrate}` : '-'}
+                          </td>
+                          <td className="py-3 px-2 text-right">
+                            {hrDiff !== null ? (
+                              <span className={hrDiff < 0 ? 'text-green-400' : hrDiff > 0 ? 'text-red-400' : 'text-slate-400'}>
+                                {hrDiff < 0 ? '↓' : hrDiff > 0 ? '↑' : '→'} {Math.abs(hrDiff)}
+                              </span>
+                            ) : (
+                              <span className="text-slate-500">-</span>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Oppsummering */}
+              {baseTests.length >= 2 && (
+                <div className="mt-6 p-4 bg-slate-900 rounded-lg">
+                  <h4 className="font-medium text-green-400 mb-3">Utvikling</h4>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                    <div>
+                      <span className="text-slate-400">Første test</span>
+                      <p className="font-medium">
+                        {baseTests[0].average_heartrate ? `${baseTests[0].average_heartrate} bpm` : '-'}
+                      </p>
+                      <p className="text-slate-500 text-xs">
+                        {new Date(baseTests[0].date).toLocaleDateString('nb-NO')}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-slate-400">Siste test</span>
+                      <p className="font-medium">
+                        {baseTests[baseTests.length - 1].average_heartrate ? `${baseTests[baseTests.length - 1].average_heartrate} bpm` : '-'}
+                      </p>
+                      <p className="text-slate-500 text-xs">
+                        {new Date(baseTests[baseTests.length - 1].date).toLocaleDateString('nb-NO')}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-slate-400">Endring snitt HR</span>
+                      {(() => {
+                        const firstHr = baseTests[0]?.average_heartrate
+                        const lastHr = baseTests[baseTests.length - 1]?.average_heartrate
+                        if (firstHr && lastHr) {
+                          const diff = lastHr - firstHr
+                          return (
+                            <>
+                              <p className={`font-medium ${diff < 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                {diff} bpm
+                              </p>
+                              <p className="text-slate-500 text-xs">
+                                {diff < 0 ? 'Bedre kondis!' : 'Høyere puls'}
+                              </p>
+                            </>
+                          )
+                        }
+                        return <p className="text-slate-500">-</p>
+                      })()}
+                    </div>
+                    <div>
+                      <span className="text-slate-400">Antall tester</span>
+                      <p className="font-medium">{baseTests.length}</p>
+                      <p className="text-slate-500 text-xs">gjennomført</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </div>
       </main>
