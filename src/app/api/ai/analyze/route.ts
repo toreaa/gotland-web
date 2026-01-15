@@ -1,50 +1,35 @@
 import { NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
-import { createServiceClient } from '@/lib/supabase'
+import { ConvexHttpClient } from 'convex/browser'
+import { api } from '../../../../../convex/_generated/api'
+import { Id } from '../../../../../convex/_generated/dataModel'
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 })
 
+const convex = new ConvexHttpClient(process.env.NEXT_PUBLIC_CONVEX_URL!)
+
 export async function POST(request: Request) {
   try {
     const { weekId, analysisType } = await request.json()
 
-    const supabase = createServiceClient()
+    // Hent uke-data fra Convex
+    const weekData = await convex.query(api.weeks.getById, {
+      weekId: weekId as Id<"weeks">
+    })
 
-    // Hent all relevant data
-    const { data: week } = await supabase
-      .from('weeks')
-      .select('*, phases(name, description)')
-      .eq('id', weekId)
-      .single()
+    if (!weekData) {
+      return NextResponse.json(
+        { error: 'Uke ikke funnet' },
+        { status: 404 }
+      )
+    }
 
-    const { data: summary } = await supabase
-      .from('weekly_summaries')
-      .select('*')
-      .eq('week_id', weekId)
-      .single()
-
-    const { data: workouts } = await supabase
-      .from('planned_workouts')
-      .select('*')
-      .eq('week_id', weekId)
-      .order('date')
-
-    const { data: activities } = await supabase
-      .from('activities')
-      .select('*')
-      .gte('date', week?.start_date)
-      .lte('date', week?.end_date)
-
-    const { data: lifestyle } = await supabase
-      .from('lifestyle_log')
-      .select('*')
-      .gte('date', week?.start_date)
-      .lte('date', week?.end_date)
+    const { week, phase, summary, workouts, activities } = weekData
 
     // Bygg kontekst for AI
-    const context = buildAnalysisContext(week, summary, workouts || [], activities || [], lifestyle || [])
+    const context = buildAnalysisContext(week, phase, summary, workouts || [], activities || [])
 
     // Velg prompt basert på analysetype
     const systemPrompt = getSystemPrompt(analysisType)
@@ -64,25 +49,6 @@ export async function POST(request: Request) {
       ? message.content[0].text
       : ''
 
-    // Lagre analysen
-    await supabase
-      .from('ai_analyses')
-      .insert({
-        week_id: weekId,
-        analysis_type: analysisType,
-        ai_model: 'claude-sonnet-4-20250514',
-        prompt: userPrompt,
-        response: analysis,
-      })
-
-    // Oppdater weekly_summaries med AI-analyse
-    if (summary) {
-      await supabase
-        .from('weekly_summaries')
-        .update({ ai_analysis: analysis })
-        .eq('id', summary.id)
-    }
-
     return NextResponse.json({ analysis, model: 'claude' })
 
   } catch (error) {
@@ -96,10 +62,10 @@ export async function POST(request: Request) {
 
 function buildAnalysisContext(
   week: any,
+  phase: any,
   summary: any,
   workouts: any[],
-  activities: any[],
-  lifestyle: any[]
+  activities: any[]
 ) {
   const today = new Date()
   const todayStr = today.toISOString().split('T')[0]
@@ -139,14 +105,6 @@ function buildAnalysisContext(
     return !!activity
   }).length || 0
 
-  const avgSleep = lifestyle?.length > 0
-    ? lifestyle.reduce((sum, l) => sum + (l.sleep_hours || 0), 0) / lifestyle.length
-    : null
-
-  const avgEnergy = lifestyle?.length > 0
-    ? lifestyle.reduce((sum, l) => sum + (l.energy_level || 0), 0) / lifestyle.length
-    : null
-
   return {
     // Dato-kontekst
     today: todayStr,
@@ -158,8 +116,8 @@ function buildAnalysisContext(
 
     // Uke-info
     weekNumber: week?.week_number,
-    phaseName: week?.phases?.name,
-    phaseDescription: week?.phases?.description,
+    phaseName: phase?.name,
+    phaseDescription: phase?.description,
     weekNotes: week?.notes,
 
     // Mål
@@ -175,10 +133,6 @@ function buildAnalysisContext(
     completionPct,
     completedWorkouts,
     actualElevation: summary?.actual_elevation || 0,
-
-    // Livsstil
-    avgSleep,
-    avgEnergy,
 
     // Aktiviteter
     activities: activities?.map(a => ({
@@ -274,10 +228,6 @@ REGISTRERTE AKTIVITETER:
 ${context.activities?.length > 0
   ? context.activities.map((a: any) => `- ${a.date}: ${a.name} (${a.km?.toFixed(1)} km)`).join('\n')
   : 'Ingen aktiviteter registrert ennå'}
-
-LIVSSTIL:
-- Gjennomsnittlig søvn: ${context.avgSleep?.toFixed(1) || 'ikke registrert'} timer
-- Gjennomsnittlig energinivå: ${context.avgEnergy?.toFixed(1) || 'ikke registrert'}/5
 
 DAGER TIL LØPET: ${context.daysUntilRace}
 

@@ -1,157 +1,29 @@
-import { NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
+import { NextRequest, NextResponse } from 'next/server'
+import { ConvexHttpClient } from 'convex/browser'
+import { api } from '../../../../../convex/_generated/api'
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
+const convex = new ConvexHttpClient(process.env.NEXT_PUBLIC_CONVEX_URL!)
 
-// Refresh Strava access token if expired
-async function refreshAccessToken(refreshToken: string): Promise<{
-  access_token: string
-  refresh_token: string
-  expires_at: number
-} | null> {
+export async function POST(request: NextRequest) {
   try {
-    const response = await fetch('https://www.strava.com/oauth/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        client_id: process.env.STRAVA_CLIENT_ID,
-        client_secret: process.env.STRAVA_CLIENT_SECRET,
-        refresh_token: refreshToken,
-        grant_type: 'refresh_token',
-      }),
+    // Sjekk om force_full_sync er satt i query params
+    const forceFullSync = request.nextUrl.searchParams.get('full') === 'true'
+
+    // Kall Convex action for å synkronisere
+    const result = await convex.action(api.strava.syncActivities, {
+      force_full_sync: forceFullSync,
     })
 
-    if (!response.ok) {
-      console.error('Token refresh failed:', await response.text())
-      return null
+    // Oppdater ukentlige sammendrag hvis nye aktiviteter ble synkronisert
+    if (result.synced > 0) {
+      await convex.mutation(api.summaries.updateAll, {})
     }
-
-    return response.json()
-  } catch (error) {
-    console.error('Token refresh error:', error)
-    return null
-  }
-}
-
-// Fetch activities from Strava
-async function fetchStravaActivities(
-  accessToken: string,
-  after?: number
-): Promise<any[]> {
-  const params = new URLSearchParams({
-    per_page: '100',
-  })
-
-  if (after) {
-    params.set('after', after.toString())
-  }
-
-  const response = await fetch(
-    `https://www.strava.com/api/v3/athlete/activities?${params}`,
-    {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    }
-  )
-
-  if (!response.ok) {
-    console.error('Strava API error:', await response.text())
-    return []
-  }
-
-  return response.json()
-}
-
-export async function POST() {
-  const supabase = createClient(supabaseUrl, supabaseServiceKey)
-
-  try {
-    // Get all stored Strava tokens
-    const { data: tokens, error: tokensError } = await supabase
-      .from('strava_tokens')
-      .select('*')
-
-    if (tokensError || !tokens?.length) {
-      return NextResponse.json({
-        message: 'No Strava accounts connected',
-        synced: 0,
-      })
-    }
-
-    let totalSynced = 0
-
-    for (const tokenRecord of tokens) {
-      let accessToken = tokenRecord.access_token
-
-      // Check if token is expired
-      const now = Math.floor(Date.now() / 1000)
-      if (tokenRecord.expires_at < now) {
-        console.log(`Refreshing token for athlete ${tokenRecord.athlete_id}`)
-        const newTokens = await refreshAccessToken(tokenRecord.refresh_token)
-
-        if (!newTokens) {
-          console.error(`Failed to refresh token for athlete ${tokenRecord.athlete_id}`)
-          continue
-        }
-
-        // Update tokens in database
-        await supabase
-          .from('strava_tokens')
-          .update({
-            access_token: newTokens.access_token,
-            refresh_token: newTokens.refresh_token,
-            expires_at: newTokens.expires_at,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('athlete_id', tokenRecord.athlete_id)
-
-        accessToken = newTokens.access_token
-      }
-
-      // Fetch all activities (no after filter for manual sync)
-      const activities = await fetchStravaActivities(accessToken)
-
-      // Store activities in Supabase
-      for (const activity of activities) {
-        const { error: insertError } = await supabase
-          .from('activities')
-          .upsert({
-            strava_id: activity.id,
-            strava_athlete_id: tokenRecord.athlete_id,
-            name: activity.name,
-            activity_type: activity.type,
-            sport_type: activity.sport_type,
-            date: activity.start_date,
-            distance_km: activity.distance / 1000,
-            moving_time_seconds: activity.moving_time,
-            elapsed_time_seconds: activity.elapsed_time,
-            elevation_gain: activity.total_elevation_gain,
-            average_speed: activity.average_speed,
-            max_speed: activity.max_speed,
-            average_heartrate: activity.average_heartrate ? Math.round(activity.average_heartrate) : null,
-            max_heartrate: activity.max_heartrate ? Math.round(activity.max_heartrate) : null,
-            calories: activity.kilojoules ? Math.round(activity.kilojoules * 0.239) : null,
-            suffer_score: activity.suffer_score,
-            raw_data: activity,
-            synced_at: new Date().toISOString(),
-          }, { onConflict: 'strava_id' })
-
-        if (insertError) {
-          console.error('Insert error:', insertError)
-        } else {
-          totalSynced++
-        }
-      }
-
-      console.log(`Synced ${activities.length} activities for athlete ${tokenRecord.athlete_id}`)
-    }
-
-    // Update weekly summaries
-    await updateWeeklySummaries(supabase)
 
     return NextResponse.json({
       message: 'Sync completed',
-      synced: totalSynced,
+      synced: result.synced,
+      skipped: result.skipped,
+      total: result.total,
       timestamp: new Date().toISOString(),
     })
 
@@ -161,46 +33,5 @@ export async function POST() {
       { error: 'Sync failed', details: String(error) },
       { status: 500 }
     )
-  }
-}
-
-// Update weekly summaries based on synced activities
-async function updateWeeklySummaries(supabase: any) {
-  const { data: weeks } = await supabase
-    .from('weeks')
-    .select('*')
-
-  if (!weeks) return
-
-  for (const week of weeks) {
-    const { data: activities } = await supabase
-      .from('activities')
-      .select('*')
-      .gte('date', week.start_date)
-      .lte('date', week.end_date + 'T23:59:59')
-
-    if (!activities?.length) continue
-
-    const totals = activities.reduce(
-      (acc: any, act: any) => ({
-        km: acc.km + (act.distance_km || 0),
-        elevation: acc.elevation + (act.elevation_gain || 0),
-        time: acc.time + (act.moving_time_seconds || 0) / 3600,
-        count: acc.count + 1,
-      }),
-      { km: 0, elevation: 0, time: 0, count: 0 }
-    )
-
-    await supabase
-      .from('weekly_summaries')
-      .upsert({
-        week_id: week.id,
-        actual_km: Math.round(totals.km * 10) / 10,
-        actual_elevation: Math.round(totals.elevation),
-        actual_hours: Math.round(totals.time * 10) / 10,
-        activities_count: totals.count,
-        completion_rate: Math.round((totals.km / week.target_km) * 100),
-        updated_at: new Date().toISOString(),
-      }, { onConflict: 'week_id' })
   }
 }

@@ -1,67 +1,48 @@
 'use client'
 
+import { useQuery } from 'convex/react'
+import { api } from '../../convex/_generated/api'
 import { useEffect, useState } from 'react'
-import { supabase, getAllWeeks, getCurrentWeek } from '@/lib/supabase'
+import { Id } from '../../convex/_generated/dataModel'
 
-interface Phase {
-  name: string
-}
-
-interface WeeklySummary {
-  actual_km: number
-  completion_percentage: number
-  ai_analysis: string | null
-}
-
-interface Activity {
-  id: number
-  strava_id: number
-  name: string
-  activity_type: string
-  sport_type: string
-  date: string
-  distance_km: number
-  moving_time_seconds: number
-  elevation_gain: number
-  average_heartrate: number | null
-  max_heartrate: number | null
-}
-
-interface BaseTest {
-  id: number
-  name: string
-  date: string
-  distance_km: number
-  moving_time_seconds: number
-  average_heartrate: number | null
-  max_heartrate: number | null
-  average_speed: number | null
-}
-
-interface WeekData {
-  id: number
+interface WeekWithDetails {
+  _id: Id<"weeks">
   week_number: number
-  target_km: number
-  target_elevation: number
+  target_km: number | undefined
+  target_elevation: number | undefined
   start_date: string
   end_date: string
-  notes: string
-  phases: Phase
-  weekly_summaries: WeeklySummary[]
+  notes: string | undefined
+  phase: {
+    name: string
+  } | null
+  summary: {
+    actual_km: number | undefined
+    completion_percentage: number | undefined
+  } | null
 }
 
 export default function Dashboard() {
-  const [weeks, setWeeks] = useState<WeekData[]>([])
-  const [selectedWeek, setSelectedWeek] = useState<WeekData | null>(null)
-  const [activities, setActivities] = useState<Activity[]>([])
+  const [selectedWeekId, setSelectedWeekId] = useState<Id<"weeks"> | null>(null)
   const [analysis, setAnalysis] = useState<string>('')
-  const [loading, setLoading] = useState(true)
   const [analyzing, setAnalyzing] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [daysUntilRace, setDaysUntilRace] = useState(0)
-  const [error, setError] = useState<string | null>(null)
-  const [stravaConnected, setStravaConnected] = useState(false)
-  const [baseTests, setBaseTests] = useState<BaseTest[]>([])
+
+  // Convex queries
+  const weeks = useQuery(api.weeks.list) ?? []
+  const currentWeekData = useQuery(api.weeks.getCurrent)
+  const stravaToken = useQuery(api.strava.getFirstToken)
+  const baseTests = useQuery(api.activities.getBaseTests) ?? []
+
+  // Hent aktiviteter for valgt uke
+  const selectedWeek = weeks.find(w => w._id === selectedWeekId)
+  const activities = useQuery(
+    api.activities.getByDateRange,
+    selectedWeek
+      ? { startDate: selectedWeek.start_date, endDate: selectedWeek.end_date + 'T23:59:59' }
+      : 'skip'
+  ) ?? []
 
   useEffect(() => {
     // Beregn dager til løpet
@@ -69,63 +50,25 @@ export default function Dashboard() {
     const today = new Date()
     const diff = Math.ceil((raceDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))
     setDaysUntilRace(diff)
-
-    // Hent data fra Supabase
-    fetchWeeks()
-    checkStravaConnection()
-    fetchBaseTests()
   }, [])
 
-  const fetchBaseTests = async () => {
-    const { data, error } = await supabase
-      .from('activities')
-      .select('id, name, date, distance_km, moving_time_seconds, average_heartrate, max_heartrate, average_speed')
-      .ilike('name', '%base%')
-      .order('date', { ascending: true })
-
-    if (!error && data) {
-      setBaseTests(data)
-    }
-  }
-
-  // Hent aktiviteter når valgt uke endres
+  // Sett valgt uke når data lastes
   useEffect(() => {
-    if (selectedWeek) {
-      fetchActivities(selectedWeek.start_date, selectedWeek.end_date)
+    if (weeks.length > 0 && !selectedWeekId) {
+      // Finn nåværende uke basert på dato
+      const today = new Date().toISOString().split('T')[0]
+      const current = weeks.find(
+        w => w.start_date <= today && w.end_date >= today
+      )
+      setSelectedWeekId(current?._id ?? weeks[0]._id)
     }
-  }, [selectedWeek])
-
-  const checkStravaConnection = async () => {
-    const { data } = await supabase
-      .from('strava_tokens')
-      .select('athlete_id')
-      .limit(1)
-    setStravaConnected(!!(data && data.length > 0))
-  }
-
-  const fetchActivities = async (startDate: string, endDate: string) => {
-    const { data, error } = await supabase
-      .from('activities')
-      .select('*')
-      .gte('date', startDate)
-      .lte('date', endDate + 'T23:59:59')
-      .order('date', { ascending: false })
-
-    if (!error && data) {
-      setActivities(data)
-    }
-  }
+  }, [weeks, selectedWeekId])
 
   const syncStrava = async () => {
     setSyncing(true)
     try {
       const res = await fetch('/api/strava/sync', { method: 'POST' })
       const data = await res.json()
-      if (data.synced > 0 && selectedWeek) {
-        fetchActivities(selectedWeek.start_date, selectedWeek.end_date)
-        fetchWeeks()
-        fetchBaseTests()
-      }
       alert(`Synkronisert ${data.synced} aktiviteter`)
     } catch (err) {
       alert('Kunne ikke synkronisere. Sjekk at Strava er koblet til.')
@@ -133,44 +76,8 @@ export default function Dashboard() {
     setSyncing(false)
   }
 
-  const fetchWeeks = async () => {
-    try {
-      setLoading(true)
-      setError(null)
-
-      const { data, error: fetchError } = await supabase
-        .from('weeks')
-        .select('*, phases(name), weekly_summaries(*)')
-        .order('week_number')
-
-      if (fetchError) throw fetchError
-
-      if (data && data.length > 0) {
-        setWeeks(data as WeekData[])
-
-        // Finn nåværende uke basert på dato
-        const today = new Date().toISOString().split('T')[0]
-        const current = data.find(
-          w => w.start_date <= today && w.end_date >= today
-        )
-
-        // Hvis vi er før treningsstart, velg uke 1
-        if (current) {
-          setSelectedWeek(current as WeekData)
-        } else {
-          setSelectedWeek(data[0] as WeekData)
-        }
-      }
-    } catch (err) {
-      console.error('Error fetching weeks:', err)
-      setError('Kunne ikke hente data fra Supabase')
-    } finally {
-      setLoading(false)
-    }
-  }
-
   const runAnalysis = async (type: string) => {
-    if (!selectedWeek) return
+    if (!selectedWeekId) return
 
     setAnalyzing(true)
     setAnalysis('')
@@ -179,7 +86,7 @@ export default function Dashboard() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          weekId: selectedWeek.id,
+          weekId: selectedWeekId,
           analysisType: type,
         }),
       })
@@ -197,7 +104,8 @@ export default function Dashboard() {
   }
 
   // Formater tid fra sekunder til lesbar format
-  const formatDuration = (seconds: number) => {
+  const formatDuration = (seconds: number | undefined) => {
+    if (!seconds) return '-'
     const h = Math.floor(seconds / 3600)
     const m = Math.floor((seconds % 3600) / 60)
     if (h > 0) return `${h}t ${m}m`
@@ -211,7 +119,7 @@ export default function Dashboard() {
   }
 
   // Aktivitetsikon basert på type
-  const getActivityIcon = (type: string) => {
+  const getActivityIcon = (type: string | undefined) => {
     switch (type?.toLowerCase()) {
       case 'run': return '🏃'
       case 'walk': return '🚶'
@@ -232,6 +140,9 @@ export default function Dashboard() {
     { name: 'Taper', weeks: weeks.filter(w => w.week_number >= 27), color: 'bg-rose-600' },
   ]
 
+  const loading = weeks.length === 0
+  const stravaConnected = !!stravaToken
+
   return (
     <div className="min-h-screen bg-slate-900 text-white">
       {/* Header */}
@@ -240,7 +151,7 @@ export default function Dashboard() {
           <div className="flex justify-between items-center">
             <div>
               <h1 className="text-2xl font-bold">Gotland Rundt 2026</h1>
-              <p className="text-slate-400">AI Treningsanalyse</p>
+              <p className="text-slate-400">AI Treningsanalyse • Powered by Convex</p>
             </div>
             <div className="text-right">
               <div className="text-4xl font-bold text-rose-500">{daysUntilRace}</div>
@@ -269,12 +180,10 @@ export default function Dashboard() {
             <h3 className="text-slate-400 text-sm mb-2">STATUS</h3>
             {loading ? (
               <div className="text-slate-400">Laster...</div>
-            ) : error ? (
-              <div className="text-rose-400 text-sm">{error}</div>
             ) : (
               <>
                 <div className="text-3xl font-bold">{weeks.length} uker</div>
-                <p className="text-slate-400">lastet fra database</p>
+                <p className="text-slate-400">lastet fra Convex</p>
               </>
             )}
           </div>
@@ -287,10 +196,10 @@ export default function Dashboard() {
             <div className="flex flex-wrap gap-2">
               {weeks.map((week) => (
                 <button
-                  key={week.id}
-                  onClick={() => setSelectedWeek(week)}
+                  key={week._id}
+                  onClick={() => setSelectedWeekId(week._id)}
                   className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                    selectedWeek?.id === week.id
+                    selectedWeekId === week._id
                       ? 'bg-rose-600 text-white'
                       : 'bg-slate-700 hover:bg-slate-600 text-slate-300'
                   }`}
@@ -305,7 +214,7 @@ export default function Dashboard() {
                 <div className="flex justify-between items-start">
                   <div>
                     <h3 className="font-bold text-lg">
-                      Uke {selectedWeek.week_number}: {selectedWeek.phases?.name || 'Ukjent fase'}
+                      Uke {selectedWeek.week_number}: {selectedWeek.phase?.name || 'Ukjent fase'}
                     </h3>
                     <p className="text-slate-400 text-sm">
                       {selectedWeek.start_date} - {selectedWeek.end_date}
@@ -319,11 +228,11 @@ export default function Dashboard() {
                 {selectedWeek.notes && (
                   <p className="mt-2 text-slate-300 text-sm">{selectedWeek.notes}</p>
                 )}
-                {selectedWeek.weekly_summaries?.[0] && (
+                {selectedWeek.summary && (
                   <div className="mt-3 pt-3 border-t border-slate-700">
                     <div className="flex gap-4 text-sm">
-                      <span>Faktisk: <strong>{selectedWeek.weekly_summaries[0].actual_km} km</strong></span>
-                      <span>Fullført: <strong>{selectedWeek.weekly_summaries[0].completion_percentage}%</strong></span>
+                      <span>Faktisk: <strong>{selectedWeek.summary.actual_km} km</strong></span>
+                      <span>Fullført: <strong>{selectedWeek.summary.completion_percentage}%</strong></span>
                     </div>
                   </div>
                 )}
@@ -339,21 +248,21 @@ export default function Dashboard() {
             <div className="flex gap-2">
               <button
                 onClick={() => runAnalysis('weekly_review')}
-                disabled={analyzing || !selectedWeek}
+                disabled={analyzing || !selectedWeekId}
                 className="bg-rose-600 hover:bg-rose-700 px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {analyzing ? 'Analyserer...' : 'Ukesanalyse'}
               </button>
               <button
                 onClick={() => runAnalysis('motivation')}
-                disabled={analyzing || !selectedWeek}
+                disabled={analyzing || !selectedWeekId}
                 className="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Motivasjon
               </button>
               <button
                 onClick={() => runAnalysis('plan_adjustment')}
-                disabled={analyzing || !selectedWeek}
+                disabled={analyzing || !selectedWeekId}
                 className="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Juster plan
@@ -380,7 +289,7 @@ export default function Dashboard() {
             </div>
           ) : (
             <div className="bg-slate-900 rounded-lg p-8 text-center text-slate-400">
-              {!selectedWeek ? (
+              {!selectedWeekId ? (
                 <p>Velg en uke for å kjøre AI-analyse.</p>
               ) : (
                 <>
@@ -464,7 +373,7 @@ export default function Dashboard() {
           ) : (
             <div className="space-y-3">
               {activities.map((activity) => (
-                <div key={activity.id} className="bg-slate-900 rounded-lg p-4">
+                <div key={activity._id} className="bg-slate-900 rounded-lg p-4">
                   <div className="flex justify-between items-start">
                     <div className="flex gap-3">
                       <span className="text-2xl">{getActivityIcon(activity.activity_type)}</span>
@@ -483,15 +392,15 @@ export default function Dashboard() {
                     </div>
                   </div>
                   <div className="flex gap-4 mt-3 text-sm text-slate-400">
-                    {activity.elevation_gain > 0 && (
-                      <span>↑ {Math.round(activity.elevation_gain)} m</span>
+                    {(activity.elevation_gain ?? 0) > 0 && (
+                      <span>↑ {Math.round(activity.elevation_gain ?? 0)} m</span>
                     )}
                     {activity.average_heartrate && (
                       <span>❤️ {Math.round(activity.average_heartrate)} bpm</span>
                     )}
-                    {activity.moving_time_seconds && activity.distance_km > 0 && (
+                    {activity.moving_time_seconds && (activity.distance_km ?? 0) > 0 && (
                       <span>
-                        Pace: {Math.floor(activity.moving_time_seconds / 60 / activity.distance_km)}:{String(Math.round((activity.moving_time_seconds / 60 / activity.distance_km % 1) * 60)).padStart(2, '0')} /km
+                        Pace: {Math.floor(activity.moving_time_seconds / 60 / (activity.distance_km ?? 1))}:{String(Math.round((activity.moving_time_seconds / 60 / (activity.distance_km ?? 1) % 1) * 60)).padStart(2, '0')} /km
                       </span>
                     )}
                   </div>
@@ -565,7 +474,7 @@ export default function Dashboard() {
                         : null
 
                       return (
-                        <tr key={test.id} className="border-b border-slate-700/50 hover:bg-slate-700/30">
+                        <tr key={test._id} className="border-b border-slate-700/50 hover:bg-slate-700/30">
                           <td className="py-3 px-2">
                             {new Date(test.date).toLocaleDateString('nb-NO', {
                               day: 'numeric',
@@ -577,8 +486,8 @@ export default function Dashboard() {
                           <td className="py-3 px-2 text-right">{test.distance_km?.toFixed(2)} km</td>
                           <td className="py-3 px-2 text-right">{formatDuration(test.moving_time_seconds)}</td>
                           <td className="py-3 px-2 text-right">
-                            {test.moving_time_seconds && test.distance_km > 0
-                              ? `${Math.floor(test.moving_time_seconds / 60 / test.distance_km)}:${String(Math.round((test.moving_time_seconds / 60 / test.distance_km % 1) * 60)).padStart(2, '0')}`
+                            {test.moving_time_seconds && (test.distance_km ?? 0) > 0
+                              ? `${Math.floor(test.moving_time_seconds / 60 / (test.distance_km ?? 1))}:${String(Math.round((test.moving_time_seconds / 60 / (test.distance_km ?? 1) % 1) * 60)).padStart(2, '0')}`
                               : '-'}
                           </td>
                           <td className="py-3 px-2 text-right font-medium text-rose-400">

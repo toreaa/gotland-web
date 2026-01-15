@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
+import { ConvexHttpClient } from 'convex/browser'
+import { api } from '../../../../../convex/_generated/api'
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
+const convex = new ConvexHttpClient(process.env.NEXT_PUBLIC_CONVEX_URL!)
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams
@@ -44,26 +44,14 @@ export async function GET(request: NextRequest) {
 
     const tokenData = await tokenResponse.json()
 
-    // Store tokens in Supabase
-    const supabase = createClient(supabaseUrl, supabaseServiceKey)
-
-    const { error: dbError } = await supabase
-      .from('strava_tokens')
-      .upsert({
-        athlete_id: tokenData.athlete.id,
-        access_token: tokenData.access_token,
-        refresh_token: tokenData.refresh_token,
-        expires_at: tokenData.expires_at,
-        athlete_data: tokenData.athlete,
-        updated_at: new Date().toISOString(),
-      }, { onConflict: 'athlete_id' })
-
-    if (dbError) {
-      console.error('Database error:', dbError)
-      return NextResponse.redirect(
-        new URL('/?error=database_error', request.url)
-      )
-    }
+    // Store tokens in Convex
+    await convex.mutation(api.strava.upsertToken, {
+      athlete_id: tokenData.athlete.id,
+      access_token: tokenData.access_token,
+      refresh_token: tokenData.refresh_token,
+      expires_at: tokenData.expires_at,
+      athlete_data: tokenData.athlete,
+    })
 
     // Redirect to success page
     return NextResponse.redirect(
