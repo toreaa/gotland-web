@@ -69,7 +69,14 @@ export default function Dashboard() {
     try {
       const res = await fetch('/api/strava/sync', { method: 'POST' })
       const data = await res.json()
-      alert(`Synkronisert ${data.synced} aktiviteter`)
+
+      if (data.error) {
+        alert(`Feil: ${data.error}`)
+      } else {
+        const synced = data.synced ?? 0
+        const skipped = data.skipped ?? 0
+        alert(`Synkronisert ${synced} nye aktiviteter${skipped > 0 ? ` (${skipped} eksisterte allerede)` : ''}`)
+      }
     } catch (err) {
       alert('Kunne ikke synkronisere. Sjekk at Strava er koblet til.')
     }
